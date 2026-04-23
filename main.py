@@ -5,6 +5,7 @@ from threading import Thread
 import pandas as pd
 import time
 import os
+from io import BytesIO
 
 # Make sure a folder exists for the uploaded images
 if not os.path.exists("logos"):
@@ -69,10 +70,8 @@ if "flask_started" not in st.session_state:
 
 # --- PART 3: STREAMLIT ADMIN DASHBOARD ---
 st.set_page_config(page_title="KUHS Admin", layout="wide")
-st.title("🏥 KUHS Central Admin Panel")
-# --- PART 3: STREAMLIT ADMIN DASHBOARD ---
-st.set_page_config(page_title="KUHS Admin", layout="wide")
-st.title("🏥 KUHS Central Admin Panel")
+st.title(" Admin Panel")
+
 
 # Navigation
 menu = st.sidebar.radio("Navigation", ["Simulate Action", "Store History"])
@@ -84,6 +83,79 @@ def get_active_store():
     res = cur.fetchone()
     conn.close()
     return res[0] if res else None
+
+def delete_store(store_id):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    
+    # Get logo path before deleting
+    cur.execute("SELECT logo FROM stores WHERE id = ?", (store_id,))
+    logo_path = cur.fetchone()
+    
+    # Delete scans
+    cur.execute("DELETE FROM scans WHERE store_id = ?", (store_id,))
+    
+    # Delete from active_sim if this store is active
+    cur.execute("DELETE FROM active_sim WHERE store_id = ?", (store_id,))
+    
+    # Delete store
+    cur.execute("DELETE FROM stores WHERE id = ?", (store_id,))
+    
+    conn.commit()
+    conn.close()
+    
+    # Delete logo file if it exists
+    if logo_path and logo_path[0] and os.path.exists(logo_path[0]):
+        os.remove(logo_path[0])
+
+def export_store_to_excel(store_id):
+    conn = sqlite3.connect(DB_NAME)
+    
+    # Get store information
+    store_info = pd.read_sql_query("SELECT id, name, location, logo FROM stores WHERE id = ?", conn, params=(store_id,))
+    
+    # Get all scans for this store
+    scans_df = pd.read_sql_query("SELECT barcode, time FROM scans WHERE store_id = ? ORDER BY time DESC", conn, params=(store_id,))
+    
+    conn.close()
+    
+    # Create a comprehensive export with all data in one sheet
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Create a combined sheet with store info and scans
+        combined_data = []
+        
+        # Add store information
+        if not store_info.empty:
+            store_row = store_info.iloc[0]
+            combined_data.append(['STORE INFORMATION'])
+            combined_data.append(['ID', store_row['id']])
+            combined_data.append(['Name', store_row['name']])
+            combined_data.append(['Location', store_row['location']])
+            combined_data.append(['Logo', store_row['logo']])
+            combined_data.append([])  # Empty row
+        
+        # Add scans information
+        combined_data.append(['BARCODE SCANS'])
+        combined_data.append(['Barcode', 'Timestamp'])
+        
+        if not scans_df.empty:
+            for _, scan_row in scans_df.iterrows():
+                combined_data.append([scan_row['barcode'], scan_row['time']])
+        else:
+            combined_data.append(['No scans recorded', ''])
+        
+        # Create DataFrame from combined data
+        # Find the maximum row length
+        max_len = max(len(row) for row in combined_data) if combined_data else 2
+        # Pad shorter rows with empty strings
+        padded_data = [row + [''] * (max_len - len(row)) for row in combined_data]
+        
+        combined_df = pd.DataFrame(padded_data)
+        combined_df.to_excel(writer, sheet_name='Store Data', index=False, header=False)
+    
+    output.seek(0)
+    return output
 
 # --- PAGE 1: SIMULATE ACTION ---
 if menu == "Simulate Action":
@@ -154,13 +226,34 @@ elif menu == "Store History":
         for index, row in stores.iterrows():
             col = cols[index % 3]
             with col:
-                st.image(row["logo"], width=150)
+                # Check if logo file exists before displaying
+                if row["logo"] and os.path.exists(row["logo"]):
+                    st.image(row["logo"], width=150)
+                else:
+                    st.write("📷 No logo available")
                 st.subheader(row["name"])
                 st.write(f"📍 {row['location']}")
                 
-                if st.button(f"View Scans for {row['name']}", key=row["id"]):
-                    st.session_state.view_store = row["id"]
-                    st.session_state.view_store_name = row["name"]
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button(f"View Scans", key=f"view_{row['id']}"):
+                        st.session_state.view_store = row["id"]
+                        st.session_state.view_store_name = row["name"]
+                with col2:
+                    if st.button(f"🗑️ Delete", key=f"delete_{row['id']}", type="secondary"):
+                        delete_store(row["id"])
+                        st.success(f"Store '{row['name']}' deleted successfully!")
+                        st.rerun()
+                
+                # Export button below the other buttons
+                excel_data = export_store_to_excel(row["id"])
+                st.download_button(
+                    label="📊 Export to Excel",
+                    data=excel_data,
+                    file_name=f"{row['name'].replace(' ', '_')}_data.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"export_{row['id']}"
+                )
         
         st.markdown("---")
         
