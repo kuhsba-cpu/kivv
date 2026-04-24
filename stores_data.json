@@ -1,0 +1,27 @@
+[
+  {
+    "name": "defacto",
+    "location": "mass city",
+    "created_at": "2026-04-24T16:43:26.943991",
+    "rooms": [
+      {
+        "name": "man's room",
+        "places": [
+          {
+            "name": "Place 1",
+            "items": 11
+          }
+        ]
+      },
+      {
+        "name": "Room 2",
+        "places": [
+          {
+            "name": "Place 1",
+            "items": 15
+          }
+        ]
+      }
+    ]
+  }
+]
