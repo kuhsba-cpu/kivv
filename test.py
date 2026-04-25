@@ -4,7 +4,6 @@ from datetime import datetime
 from flask import Flask, request
 from threading import Thread
 import time
-import random
 from io import BytesIO
 import barcode
 from barcode.writer import ImageWriter
@@ -160,11 +159,22 @@ def delete_store(store_id):
     conn.close()
 
 
-def remove_room_place_state_keys():
+def clear_structure_state():
     keys = [
         key
         for key in st.session_state.keys()
-        if key.startswith(("room_name_", "place_count_", "place_name_", "item_count_"))
+        if key.startswith(
+            (
+                "structure_",
+                "room_id_",
+                "room_name_",
+                "place_count_",
+                "place_id_",
+                "place_name_",
+                "item_count_",
+                "place_code_",
+            )
+        )
     ]
     for key in keys:
         del st.session_state[key]
@@ -172,10 +182,9 @@ def remove_room_place_state_keys():
 
 def clear_store_form_state():
     st.session_state.store_form_store_id = 0
-    for key in ["store_form_name", "store_form_location", "store_form_rooms_count"]:
+    for key in ["store_form_name", "store_form_location"]:
         if key in st.session_state:
             del st.session_state[key]
-    remove_room_place_state_keys()
 
 
 def load_store_form(store_id):
@@ -189,46 +198,118 @@ def load_store_form(store_id):
     st.session_state.store_form_name = store["name"]
     st.session_state.store_form_location = store["location"]
 
+
+def load_structure_form(store_id):
+    clear_structure_state()
+    st.session_state.structure_store_id = store_id
     rooms = get_store_structure(store_id)
-    st.session_state.store_form_rooms_count = max(1, len(rooms))
+    st.session_state.structure_rooms_count = max(1, len(rooms))
 
     for room_index, room in enumerate(rooms):
+        st.session_state[f"room_id_{room_index}"] = room["id"]
         st.session_state[f"room_name_{room_index}"] = room["name"]
-        st.session_state[f"place_count_{room_index}"] = max(1, len(room["places"]))
+        place_count = max(1, len(room["places"]))
+        st.session_state[f"place_count_{room_index}"] = place_count
         for place_index, place in enumerate(room["places"]):
+            st.session_state[f"place_id_{room_index}_{place_index}"] = place["id"]
             st.session_state[f"place_name_{room_index}_{place_index}"] = place["name"]
             st.session_state[f"item_count_{room_index}_{place_index}"] = place["item_count"]
+            st.session_state[f"place_code_{room_index}_{place_index}"] = place["unique_code"]
 
 
-def save_room_and_places(store_id, rooms_count):
+def validate_structure_inputs(rooms_count):
+    seen_codes = set()
+    for room_index in range(rooms_count):
+        room_name = st.session_state.get(f"room_name_{room_index}", "").strip()
+        if not room_name:
+            return f"Room {room_index + 1} needs a name."
+
+        place_count = st.session_state.get(f"place_count_{room_index}", 1)
+        for place_index in range(place_count):
+            place_name = st.session_state.get(f"place_name_{room_index}_{place_index}", "").strip()
+            place_code = st.session_state.get(f"place_code_{room_index}_{place_index}", "").strip()
+
+            if not place_name:
+                return f"Place {place_index + 1} in Room {room_index + 1} needs a name."
+            if not place_code:
+                return f"Place {place_index + 1} in Room {room_index + 1} needs a unique code."
+            if place_code in seen_codes:
+                return f"Duplicate place code '{place_code}' found. Each place must have a unique code."
+            seen_codes.add(place_code)
+    return None
+
+
+def save_store_structure(store_id, rooms_count):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("DELETE FROM places WHERE room_id IN (SELECT id FROM rooms WHERE store_id = ?)", (store_id,))
-    cur.execute("DELETE FROM rooms WHERE store_id = ?", (store_id,))
-    conn.commit()
+
+    active_room_ids = []
+    active_place_ids = []
 
     for room_index in range(rooms_count):
         room_name = st.session_state.get(f"room_name_{room_index}", f"Room {room_index + 1}").strip() or f"Room {room_index + 1}"
-        cur.execute(
-            "INSERT INTO rooms (store_id, name) VALUES (?, ?)",
-            (store_id, room_name),
-        )
-        room_id = cur.lastrowid
+        room_id = st.session_state.get(f"room_id_{room_index}")
+
+        if room_id:
+            cur.execute(
+                "UPDATE rooms SET name = ? WHERE id = ? AND store_id = ?",
+                (room_name, room_id, store_id),
+            )
+        else:
+            cur.execute(
+                "INSERT INTO rooms (store_id, name) VALUES (?, ?)",
+                (store_id, room_name),
+            )
+            room_id = cur.lastrowid
+            st.session_state[f"room_id_{room_index}"] = room_id
+
+        active_room_ids.append(room_id)
+
         place_count = st.session_state.get(f"place_count_{room_index}", 1)
-        
         for place_index in range(place_count):
             place_name = st.session_state.get(
                 f"place_name_{room_index}_{place_index}", f"Place {place_index + 1}"
             ).strip() or f"Place {place_index + 1}"
-            item_count = st.session_state.get(f"item_count_{room_index}_{place_index}", 0)
-            
-            # Generate a random 8-digit code
-            unique_code = str(random.randint(10000000, 99999999))
-            
-            cur.execute(
-                "INSERT INTO places (room_id, name, item_count, unique_code) VALUES (?, ?, ?, ?)",
-                (room_id, place_name, int(item_count), unique_code),
-            )
+            item_count = int(st.session_state.get(f"item_count_{room_index}_{place_index}", 0))
+            place_code = st.session_state.get(f"place_code_{room_index}_{place_index}", "").strip()
+            place_id = st.session_state.get(f"place_id_{room_index}_{place_index}")
+
+            if place_id:
+                cur.execute(
+                    "UPDATE places SET name = ?, item_count = ?, unique_code = ? WHERE id = ? AND room_id = ?",
+                    (place_name, item_count, place_code, place_id, room_id),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO places (room_id, name, item_count, unique_code) VALUES (?, ?, ?, ?)",
+                    (room_id, place_name, item_count, place_code),
+                )
+                place_id = cur.lastrowid
+                st.session_state[f"place_id_{room_index}_{place_index}"] = place_id
+
+            active_place_ids.append(place_id)
+
+    if active_place_ids:
+        placeholders = ",".join("?" for _ in active_place_ids)
+        cur.execute(
+            f"DELETE FROM places WHERE room_id IN (SELECT id FROM rooms WHERE store_id = ?) AND id NOT IN ({placeholders})",
+            (store_id, *active_place_ids),
+        )
+    else:
+        cur.execute(
+            "DELETE FROM places WHERE room_id IN (SELECT id FROM rooms WHERE store_id = ?)",
+            (store_id,),
+        )
+
+    if active_room_ids:
+        placeholders = ",".join("?" for _ in active_room_ids)
+        cur.execute(
+            f"DELETE FROM rooms WHERE store_id = ? AND id NOT IN ({placeholders})",
+            (store_id, *active_room_ids),
+        )
+    else:
+        cur.execute("DELETE FROM rooms WHERE store_id = ?", (store_id,))
+
     conn.commit()
     conn.close()
 
@@ -397,6 +478,9 @@ if "selected_store_id" not in st.session_state:
 if "store_form_store_id" not in st.session_state:
     clear_store_form_state()
 
+if "structure_store_id" not in st.session_state:
+    st.session_state.structure_store_id = 0
+
 
 # --- UI ---
 menu = st.sidebar.radio("Navigation", ["Manage stores", "Barcode simulation"])
@@ -408,6 +492,7 @@ for store in stores:
 
 if menu == "Manage stores":
     st.header("Store manager")
+    st.write("Only create or remove stores here. Configure rooms and places in the Barcode simulation tab.")
 
     selected_store_id = st.selectbox(
         "Select store to edit",
@@ -436,47 +521,6 @@ if menu == "Manage stores":
         value=st.session_state.get("store_form_location", ""),
         key="store_form_location",
     )
-    rooms_count = st.number_input(
-        "Number of rooms",
-        min_value=1,
-        value=st.session_state.get("store_form_rooms_count", 1),
-        step=1,
-        key="store_form_rooms_count",
-    )
-
-    for room_index in range(rooms_count):
-        with st.expander(f"Room {room_index + 1}", expanded=True):
-            st.text_input(
-                "Room name",
-                value=st.session_state.get(f"room_name_{room_index}", f"Room {room_index + 1}"),
-                key=f"room_name_{room_index}",
-            )
-            place_count = st.number_input(
-                "Number of places in this room",
-                min_value=1,
-                value=st.session_state.get(f"place_count_{room_index}", 1),
-                key=f"place_count_{room_index}",
-                step=1,
-            )
-
-            for place_index in range(place_count):
-                st.markdown(
-                    f"**Place {place_index + 1} in {st.session_state.get(f'room_name_{room_index}', f'Room {room_index + 1}')}'**"
-                )
-                st.text_input(
-                    "Place name",
-                    value=st.session_state.get(
-                        f"place_name_{room_index}_{place_index}", f"Place {place_index + 1}"
-                    ),
-                    key=f"place_name_{room_index}_{place_index}",
-                )
-                st.number_input(
-                    "Number of items",
-                    min_value=0,
-                    value=st.session_state.get(f"item_count_{room_index}_{place_index}", 0),
-                    key=f"item_count_{room_index}_{place_index}",
-                    step=1,
-                )
 
     submitted = st.button("Save store")
 
@@ -486,17 +530,15 @@ if menu == "Manage stores":
         else:
             if st.session_state.store_form_store_id > 0:
                 update_store(st.session_state.store_form_store_id, store_name.strip(), store_location.strip())
-                save_room_and_places(st.session_state.store_form_store_id, rooms_count)
                 st.success("Store updated successfully.")
             else:
                 new_id = insert_store(store_name.strip(), store_location.strip())
-                save_room_and_places(new_id, rooms_count)
                 st.success("Store added successfully.")
             clear_store_form_state()
             st.rerun()
 
     if st.session_state.store_form_store_id > 0:
-        if st.button("Delete this store"):
+        if st.button("Delete this store", type="secondary"):
             delete_store(st.session_state.store_form_store_id)
             st.success("Store deleted.")
             clear_store_form_state()
@@ -511,113 +553,231 @@ if menu == "Manage stores":
         for store in stores:
             st.write(f"**{store['id']} - {store['name']}**")
             st.write(f"Location: {store['location']}")
-            rooms = get_store_structure(store["id"])
-            for room_index, room in enumerate(rooms, start=1):
-                st.write(f"- Room {room_index}: {room['name']}")
-                for place_index, place in enumerate(room["places"], start=1):
-                    st.write(f"  - Place {place_index}: {place['name']} | Items: {place['item_count']}")
-                    st.write(f"    Code: {place['unique_code']}")
-                    barcode_img = get_barcode_image(place['unique_code'])
-                    st.image(barcode_img, width=250)
+            st.write("Configure rooms and places in the Barcode simulation page.")
             st.markdown("---")
 
 elif menu == "Barcode simulation":
     st.header("Barcode simulation")
 
-    conn = get_conn()
-    active_sim = conn.execute("SELECT store_id, active_place_id FROM active_sim LIMIT 1").fetchone()
-    conn.close()
+    if not stores:
+        st.info("Create a store first in the Manage stores tab.")
+    else:
+        structure_options = {0: "Select store to configure"}
+        for store in stores:
+            structure_options[store["id"]] = f"{store['id']} - {store['name']} ({store['location']})"
 
-    if active_sim:
-        active_store_id = active_sim["store_id"]
-        active_place_id = active_sim["active_place_id"]
-        store = get_store(active_store_id)
-        open_place = get_place_by_id(active_place_id)
-        
-        st.success(f"🟢 SIMULATION RUNNING FOR: {store['name']}")
-        
-        if open_place:
-            st.info(f"📂 PLACE OPEN: **{open_place['name']}** (Code: {open_place['unique_code']}). Scan items to save them here. Scan place code again to close.")
+        selected_store_id = st.selectbox(
+            "Select store to configure and scan",
+            options=list(structure_options.keys()),
+            format_func=lambda x: structure_options[x],
+            index=list(structure_options.keys()).index(st.session_state.structure_store_id)
+            if st.session_state.structure_store_id in structure_options
+            else 0,
+            key="structure_store_id",
+        )
+
+        if selected_store_id != st.session_state.get("structure_store_id", 0):
+            if selected_store_id == 0:
+                clear_structure_state()
+            else:
+                load_structure_form(selected_store_id)
+
+        if selected_store_id == 0:
+            st.warning("Select a store first to manage rooms, places, and simulation.")
         else:
-            st.warning("⏳ WAITING: Scan a place's unique numeric barcode to open it.")
-            
-        st.subheader("Live Scans")
-        scans = get_scans(active_store_id)
-        
-        if not scans:
-            st.write("No items scanned yet.")
-        else:
-            for scan in scans:
-                cols = st.columns([6, 3, 2])
-                cols[0].write(f"**{scan['barcode']}**")
-                cols[1].write(f"📍 {scan['place_name']}")
-                if cols[2].button("Delete", key=f"delete_scan_{scan['id']}"):
-                    delete_scan(scan['id'])
+            store = get_store(selected_store_id)
+            st.subheader(f"Store: {store['name']} — {store['location']}")
+
+            with st.expander("Manage rooms and places", expanded=True):
+                rooms_count = st.number_input(
+                    "Number of rooms",
+                    min_value=1,
+                    value=st.session_state.get("structure_rooms_count", 1),
+                    step=1,
+                    key="structure_rooms_count",
+                )
+
+                control_cols = st.columns(2)
+                if control_cols[0].button("Add room"):
+                    st.session_state.structure_rooms_count = rooms_count + 1
+                    st.rerun()
+                if rooms_count > 1 and control_cols[1].button("Remove last room"):
+                    st.session_state.structure_rooms_count = rooms_count - 1
                     st.rerun()
 
-        st.markdown("---")
-        if st.button("🛑 Stop Simulation", type="primary"):
-            summary = compare_place_counts(active_store_id)
-            conn = get_conn()
-            conn.execute("DELETE FROM active_sim")
-            conn.commit()
-            conn.close()
-            st.session_state.simulation_stop_summary = summary
-            st.session_state.simulation_stop_store_id = active_store_id
-            st.rerun()
-            
-        time.sleep(2)
-        st.rerun()
-        
-    else:
-        if not stores:
-            st.info("Create a store first in the Manage stores tab.")
-        else:
-            st.warning("🔴 No simulation running. Start one below to receive scans.")
-            
-            chosen_store = st.selectbox(
-                "Select store for simulation",
-                options=[store["id"] for store in stores],
-                format_func=lambda store_id: f"{store_id} - {get_store(store_id)['name']}",
-                index=0,
-            )
-
-            if st.button("🚀 Start Simulation", type="primary"):
-                conn = get_conn()
-                conn.execute("DELETE FROM active_sim")
-                conn.execute("INSERT INTO active_sim (store_id, active_place_id) VALUES (?, NULL)", (chosen_store,))
-                conn.commit()
-                conn.close()
-                st.rerun()
-
-            if "simulation_stop_summary" in st.session_state:
-                st.markdown("---")
-                st.subheader("Simulation result check")
-                store = get_store(st.session_state.simulation_stop_store_id)
-                if store:
-                    st.write(f"Store: **{store['name']}** ({store['location']})")
-                summary = st.session_state.simulation_stop_summary
-                for item in summary:
-                    if item["difference"] == 0:
-                        st.success(
-                            f"{item['room_name']} / {item['place_name']}: expected {item['expected']}, scanned {item['scanned']} — OK"
+                for room_index in range(rooms_count):
+                    with st.expander(f"Room {room_index + 1}", expanded=True):
+                        st.text_input(
+                            "Room name",
+                            value=st.session_state.get(f"room_name_{room_index}", f"Room {room_index + 1}"),
+                            key=f"room_name_{room_index}",
                         )
+
+                        place_count = st.number_input(
+                            "Number of places",
+                            min_value=1,
+                            value=st.session_state.get(f"place_count_{room_index}", 1),
+                            key=f"place_count_{room_index}",
+                            step=1,
+                        )
+
+                        place_controls = st.columns(2)
+                        if place_controls[0].button("Add place", key=f"add_place_{room_index}"):
+                            st.session_state[f"place_count_{room_index}"] = place_count + 1
+                            st.rerun()
+                        if place_count > 1 and place_controls[1].button("Remove last place", key=f"remove_place_{room_index}"):
+                            st.session_state[f"place_count_{room_index}"] = place_count - 1
+                            st.rerun()
+
+                        for place_index in range(place_count):
+                            st.markdown(
+                                f"**Place {place_index + 1} in {st.session_state.get(f'room_name_{room_index}', f'Room {room_index + 1}')}'**"
+                            )
+                            st.text_input(
+                                "Place name",
+                                value=st.session_state.get(f"place_name_{room_index}_{place_index}", f"Place {place_index + 1}"),
+                                key=f"place_name_{room_index}_{place_index}",
+                            )
+                            st.text_input(
+                                "Place barcode code",
+                                value=st.session_state.get(f"place_code_{room_index}_{place_index}", ""),
+                                key=f"place_code_{room_index}_{place_index}",
+                            )
+                            st.number_input(
+                                "Expected item count",
+                                min_value=0,
+                                value=st.session_state.get(f"item_count_{room_index}_{place_index}", 0),
+                                key=f"item_count_{room_index}_{place_index}",
+                                step=1,
+                            )
+
+                if st.button("Save structure", type="primary"):
+                    error = validate_structure_inputs(rooms_count)
+                    if error:
+                        st.error(error)
                     else:
-                        st.error(
-                            f"{item['room_name']} / {item['place_name']}: expected {item['expected']}, scanned {item['scanned']} — difference {item['difference']}"
-                        )
-                del st.session_state.simulation_stop_summary
-                del st.session_state.simulation_stop_store_id
+                        try:
+                            save_store_structure(selected_store_id, rooms_count)
+                            st.success("Rooms and places saved successfully.")
+                            load_structure_form(selected_store_id)
+                        except sqlite3.IntegrityError as exc:
+                            st.error("A place code must be unique. Please adjust the duplicate code and save again.")
 
             st.markdown("---")
-            st.subheader("Past Scans")
-            scans = get_scans(chosen_store)
-            if not scans:
-                st.info("No barcodes scanned for this store yet.")
+            st.subheader("Saved structure")
+            saved_rooms = get_store_structure(selected_store_id)
+            if not saved_rooms:
+                st.info("No rooms and places saved yet. Add them above and save the structure.")
             else:
-                for scan in scans:
-                    st.write(f"**{scan['barcode']}** in 📍 {scan['place_name']} — {scan['time']}")
+                for room_index, room in enumerate(saved_rooms, start=1):
+                    st.write(f"**Room {room_index}: {room['name']}**")
+                    for place_index, place in enumerate(room["places"], start=1):
+                        cols = st.columns([6, 2])
+                        cols[0].write(f"Place {place_index}: {place['name']} — expected {place['item_count']}")
+                        cols[0].write(f"Code: {place['unique_code']}")
+                        cols[1].image(get_barcode_image(place["unique_code"]), width=220)
+                    st.markdown("---")
 
-            st.markdown("---")
-            st.write("Database file:")
-            st.code(DB_FILE)
+            conn = get_conn()
+            active_sim = conn.execute("SELECT store_id, active_place_id FROM active_sim LIMIT 1").fetchone()
+            conn.close()
+
+            if active_sim:
+                active_store_id = active_sim["store_id"]
+                active_place_id = active_sim["active_place_id"]
+                active_store = get_store(active_store_id)
+                open_place = get_place_by_id(active_place_id)
+
+                if active_store_id != selected_store_id:
+                    st.warning(f"Simulation is currently active for {active_store['name']}. Stop it before starting a new one.")
+
+                st.success(f"🟢 SIMULATION RUNNING FOR: {active_store['name']}")
+                if open_place:
+                    st.info(f"📂 PLACE OPEN: **{open_place['name']}** (Code: {open_place['unique_code']}). Scan items to save them here. Scan place code again to close.")
+                else:
+                    st.warning("⏳ WAITING: Scan a place's unique barcode to open it.")
+
+                st.subheader("Live Scans")
+                scans = get_scans(active_store_id)
+                if not scans:
+                    st.write("No items scanned yet.")
+                else:
+                    for scan in scans:
+                        cols = st.columns([6, 3, 2])
+                        cols[0].write(f"**{scan['barcode']}**")
+                        cols[1].write(f"📍 {scan['place_name']}")
+                        if cols[2].button("Delete", key=f"delete_scan_{scan['id']}"):
+                            delete_scan(scan['id'])
+                            st.rerun()
+
+                st.markdown("---")
+                if st.button("🛑 Stop Simulation", type="primary"):
+                    summary = compare_place_counts(active_store_id)
+                    conn = get_conn()
+                    conn.execute("DELETE FROM active_sim")
+                    conn.commit()
+                    conn.close()
+                    st.session_state.simulation_stop_summary = summary
+                    st.session_state.simulation_stop_store_id = active_store_id
+                    st.rerun()
+
+                time.sleep(2)
+                st.rerun()
+            else:
+                st.warning("🔴 No simulation running. Start one below to receive scans.")
+                if st.button("🚀 Start Simulation", type="primary"):
+                    conn = get_conn()
+                    conn.execute("DELETE FROM active_sim")
+                    conn.execute("INSERT INTO active_sim (store_id, active_place_id) VALUES (?, NULL)", (selected_store_id,))
+                    conn.commit()
+                    conn.close()
+                    st.rerun()
+
+                if "simulation_stop_summary" in st.session_state:
+                    st.markdown("---")
+                    st.subheader("Simulation result check")
+                    store = get_store(st.session_state.simulation_stop_store_id)
+                    if store:
+                        st.write(f"Store: **{store['name']}** ({store['location']})")
+                    summary = st.session_state.simulation_stop_summary
+                    for item in summary:
+                        if item["difference"] == 0:
+                            st.success(
+                                f"{item['room_name']} / {item['place_name']}: expected {item['expected']}, scanned {item['scanned']} — OK"
+                            )
+                        else:
+                            st.error(
+                                f"{item['room_name']} / {item['place_name']}: expected {item['expected']}, scanned {item['scanned']} — difference {item['difference']}"
+                            )
+                    del st.session_state.simulation_stop_summary
+                    del st.session_state.simulation_stop_store_id
+
+                st.markdown("---")
+                st.subheader("Place scan difference")
+                place_differences = compare_place_counts(selected_store_id)
+                if not place_differences:
+                    st.info("No configured places to compare yet.")
+                else:
+                    for item in place_differences:
+                        if item["difference"] == 0:
+                            st.success(
+                                f"{item['room_name']} / {item['place_name']}: expected {item['expected']}, scanned {item['scanned']} — OK"
+                            )
+                        else:
+                            status = "over" if item["difference"] > 0 else "under"
+                            st.error(
+                                f"{item['room_name']} / {item['place_name']}: expected {item['expected']}, scanned {item['scanned']} — {abs(item['difference'])} {status}"
+                            )
+
+                st.markdown("---")
+                st.subheader("Past Scans")
+                scans = get_scans(selected_store_id)
+                if not scans:
+                    st.info("No barcodes scanned for this store yet.")
+                else:
+                    for scan in scans:
+                        st.write(f"**{scan['barcode']}** in 📍 {scan['place_name']} — {scan['time']}")
+
+                st.markdown("---")
+                st.write("Database file:")
+                st.code(DB_FILE)
