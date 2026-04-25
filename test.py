@@ -597,16 +597,20 @@ elif menu == "Barcode simulation":
                     key="structure_rooms_count",
                 )
 
-                control_cols = st.columns(2)
-                if control_cols[0].button("Add room"):
-                    st.session_state.structure_rooms_count = rooms_count + 1
-                    st.rerun()
-                if rooms_count > 1 and control_cols[1].button("Remove last room"):
-                    st.session_state.structure_rooms_count = rooms_count - 1
-                    st.rerun()
+                st.markdown("""
+                    <div style='background:#111827; padding:12px; border-radius:10px; margin-bottom:16px; color:#e2e8f0;'>
+                    Use the room and place counts to update the structure, then click **Save structure**.
+                    </div>
+                """, unsafe_allow_html=True)
 
                 for room_index in range(rooms_count):
-                    with st.expander(f"Room {room_index + 1}", expanded=True):
+                    with st.container():
+                        st.markdown(
+                            f"<div style='padding:12px; border:1px solid #374151; border-radius:12px; margin-bottom:18px; background:#0f172a; color:#f8fafc;'>"
+                            f"<h4 style='margin:0 0 8px 0; color:#f8fafc;'>Room {room_index + 1}</h4>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
                         st.text_input(
                             "Room name",
                             value=st.session_state.get(f"room_name_{room_index}", f"Room {room_index + 1}"),
@@ -621,17 +625,12 @@ elif menu == "Barcode simulation":
                             step=1,
                         )
 
-                        place_controls = st.columns(2)
-                        if place_controls[0].button("Add place", key=f"add_place_{room_index}"):
-                            st.session_state[f"place_count_{room_index}"] = place_count + 1
-                            st.rerun()
-                        if place_count > 1 and place_controls[1].button("Remove last place", key=f"remove_place_{room_index}"):
-                            st.session_state[f"place_count_{room_index}"] = place_count - 1
-                            st.rerun()
-
                         for place_index in range(place_count):
                             st.markdown(
-                                f"**Place {place_index + 1} in {st.session_state.get(f'room_name_{room_index}', f'Room {room_index + 1}')}'**"
+                                f"<div style='padding:12px; border:1px solid #374151; border-radius:10px; margin-bottom:14px; background:#0f172a; color:#f8fafc;'>"
+                                f"<strong>Place {place_index + 1}</strong>"
+                                f"</div>",
+                                unsafe_allow_html=True,
                             )
                             st.text_input(
                                 "Place name",
@@ -670,12 +669,25 @@ elif menu == "Barcode simulation":
                 st.info("No rooms and places saved yet. Add them above and save the structure.")
             else:
                 for room_index, room in enumerate(saved_rooms, start=1):
-                    st.write(f"**Room {room_index}: {room['name']}**")
+                    st.markdown(
+                        f"<div style='padding:16px; border:1px solid #374151; border-radius:14px; background:#0f172a; margin-bottom:18px; color:#f8fafc;'>"
+                        f"<h3 style='margin:0 0 10px 0; color:#f8fafc;'>Room {room_index}: {room['name']}</h3>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
                     for place_index, place in enumerate(room["places"], start=1):
-                        cols = st.columns([6, 2])
-                        cols[0].write(f"Place {place_index}: {place['name']} — expected {place['item_count']}")
-                        cols[0].write(f"Code: {place['unique_code']}")
-                        cols[1].image(get_barcode_image(place["unique_code"]), width=220)
+                        cols = st.columns([3, 1])
+                        with cols[0]:
+                            st.markdown(
+                                f"<div style='padding:12px; border:1px solid #374151; border-radius:12px; background:#0f172a; color:#f8fafc;'>"
+                                f"<strong>Place {place_index}: {place['name']}</strong><br/>"
+                                f"Expected items: <strong>{place['item_count']}</strong><br/>"
+                                f"Code: <code style='background:#111827; color:#e2e8f0; padding:2px 4px; border-radius:4px;'>{place['unique_code']}</code>"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+                        with cols[1]:
+                            st.image(get_barcode_image(place["unique_code"]), width=220)
                     st.markdown("---")
 
             conn = get_conn()
