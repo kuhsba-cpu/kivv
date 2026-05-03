@@ -5,13 +5,43 @@ from flask import Flask, request
 from threading import Thread
 import time
 from io import BytesIO
+import pandas as pd
 import barcode
 from barcode.writer import ImageWriter
 
 DB_FILE = "aa.db"
 
 st.set_page_config(page_title="Store Manager", layout="wide")
-st.title("Store, Rooms, Places + Barcode Simulation")
+st.markdown(
+    """
+    <style>
+    .stApp { background: #030611; color: #e2e8f0; }
+    .page-header { padding: 24px; border-radius: 24px; background: linear-gradient(135deg, #111827 0%, #17233a 100%); box-shadow: 0 24px 80px rgba(15,23,42,.35); margin-bottom: 24px; }
+    .page-header h1 { margin: 0; font-size: 44px; letter-spacing: -0.02em; color: #ffffff; }
+    .page-header p { margin: 10px 0 0; color: #94a3b8; font-size: 16px; }
+    .card { background: #111827; border: 1px solid rgba(148,163,184,.12); border-radius: 24px; padding: 24px; box-shadow: 0 20px 60px rgba(15,23,42,.16); }
+    .card-title { margin: 0; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.14em; font-size: 13px; }
+    .card-value { margin: 10px 0 0; color: #ffffff; font-size: 36px; font-weight: 800; }
+    .card-note { margin: 14px 0 0; color: #94a3b8; line-height: 1.6; }
+    .button-block { padding: 22px; border-radius: 20px; background: #0f172a; border: 1px solid rgba(148,163,184,.08); }
+    .button-label { margin: 0 0 12px; font-size: 14px; color: #94a3b8; }
+    .section-title { margin-bottom: 16px; color: #f8fafc; }
+    .detail-box { background: #0b1221; border: 1px solid rgba(148,163,184,.08); border-radius: 20px; padding: 18px; }
+    .stButton>button { background: #2563eb; color: #ffffff; border: none; border-radius: 12px; padding: 12px 18px; font-weight: 700; box-shadow: 0 12px 30px rgba(37,99,235,.2); }
+    .stButton>button:hover { background: #1d4ed8; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+st.markdown(
+    """
+    <div class="page-header">
+      <h1>Store Manager Dashboard</h1>
+      <p>Track stores, rooms, places, and barcode scans from one modern control center.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # --- Database helpers ---
@@ -482,17 +512,118 @@ if "structure_store_id" not in st.session_state:
     st.session_state.structure_store_id = 0
 
 
+def get_active_store_name():
+    conn = get_conn()
+    row = conn.execute("SELECT store_id FROM active_sim LIMIT 1").fetchone()
+    conn.close()
+    if not row:
+        return None
+    store = get_store(row["store_id"])
+    return store["name"] if store else None
+
+
+def get_dashboard_summary():
+    conn = get_conn()
+    total_stores = conn.execute("SELECT COUNT(*) FROM stores").fetchone()[0]
+    total_places = conn.execute("SELECT COUNT(*) FROM places").fetchone()[0]
+    total_scans = conn.execute("SELECT COUNT(*) FROM scans").fetchone()[0]
+    scan_by_store = pd.read_sql_query(
+        "SELECT stores.name AS store_name, COUNT(scans.id) AS scan_count "
+        "FROM stores LEFT JOIN scans ON stores.id = scans.store_id "
+        "GROUP BY stores.id ORDER BY scan_count DESC",
+        conn,
+    )
+    scan_over_time = pd.read_sql_query(
+        "SELECT DATE(time) AS scan_date, COUNT(*) AS scan_count "
+        "FROM scans GROUP BY DATE(time) ORDER BY scan_date",
+        conn,
+    )
+    conn.close()
+    return total_stores, total_places, total_scans, scan_by_store, scan_over_time
+
+
+def render_home_page():
+    total_stores, total_places, total_scans, scan_by_store, scan_over_time = get_dashboard_summary()
+    active_store = get_active_store_name()
+
+    with st.container():
+        st.markdown('<p class="section-title">Overview</p>', unsafe_allow_html=True)
+        cols = st.columns(3, gap="large")
+        cols[0].markdown(
+            f'<div class="card"><p class="card-title">Stores</p><p class="card-value">{total_stores}</p><p class="card-note">Total registered stores tracked in the system.</p></div>',
+            unsafe_allow_html=True,
+        )
+        cols[1].markdown(
+            f'<div class="card"><p class="card-title">Places</p><p class="card-value">{total_places}</p><p class="card-note">Configured rooms and places ready for barcode simulation.</p></div>',
+            unsafe_allow_html=True,
+        )
+        cols[2].markdown(
+            f'<div class="card"><p class="card-title">Scans</p><p class="card-value">{total_scans}</p><p class="card-note">Total barcode scans collected across all stores.</p></div>',
+            unsafe_allow_html=True,
+        )
+
+    with st.container():
+        st.markdown('<p class="section-title">Live analytics</p>', unsafe_allow_html=True)
+        chart_col1, chart_col2 = st.columns(2, gap="large")
+        with chart_col1:
+            st.markdown('<div class="card"><p class="card-title">Scans by store</p>', unsafe_allow_html=True)
+            if not scan_by_store.empty:
+                chart_data = scan_by_store.rename(columns={"store_name": "Store", "scan_count": "Scans"}).set_index("Store")
+                st.bar_chart(chart_data)
+            else:
+                st.info("No scan data available yet.")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        with chart_col2:
+            st.markdown('<div class="card"><p class="card-title">Scan volume over time</p>', unsafe_allow_html=True)
+            if not scan_over_time.empty:
+                time_data = scan_over_time.rename(columns={"scan_date": "Date", "scan_count": "Scans"}).set_index("Date")
+                st.line_chart(time_data)
+            else:
+                st.info("No historical scan data found.")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    with st.container():
+        st.markdown('<p class="section-title">Quick actions</p>', unsafe_allow_html=True)
+        action_col1, action_col2 = st.columns(2, gap="large")
+        action_col1.markdown(
+            '<div class="button-block"><p class="button-label">Create or update store records.</p></div>',
+            unsafe_allow_html=True,
+        )
+        action_col2.markdown(
+            '<div class="button-block"><p class="button-label">Prepare rooms, places and start scanning.</p></div>',
+            unsafe_allow_html=True,
+        )
+        if action_col1.button("Manage stores"):
+            st.session_state.current_page = "Manage stores"
+            st.experimental_rerun()
+        if action_col2.button("Barcode simulation"):
+            st.session_state.current_page = "Barcode simulation"
+            st.experimental_rerun()
+
+    if active_store:
+        st.markdown('<div class="card"><p class="card-title">Active simulation</p><p class="card-value">Running</p><p class="card-note">Current active store: ' + active_store + '</p></div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="card"><p class="card-title">Active simulation</p><p class="card-value">Stopped</p><p class="card-note">No store is currently receiving scans.</p></div>', unsafe_allow_html=True)
+
+
 # --- UI ---
-menu = st.sidebar.radio("Navigation", ["Manage stores", "Barcode simulation"])
+if "current_page" not in st.session_state:
+    st.session_state.current_page = "Home"
+
+page = st.sidebar.radio("Navigation", ["Home", "Manage stores", "Barcode simulation"], index=["Home", "Manage stores", "Barcode simulation"].index(st.session_state.current_page))
+st.session_state.current_page = page
 
 stores = get_all_stores()
 store_options = {0: "New store"}
 for store in stores:
     store_options[store["id"]] = f"{store['id']} - {store['name']} ({store['location']})"
 
-if menu == "Manage stores":
-    st.header("Store manager")
-    st.write("Only create or remove stores here. Configure rooms and places in the Barcode simulation tab.")
+if page == "Home":
+    render_home_page()
+
+elif page == "Manage stores":
+    st.markdown('<div class="card"><p class="card-title">Store manager</p><h2 style="margin:0;color:#ffffff;">Create and manage stores</h2><p class="card-note">Only create or remove stores here. Configure rooms and places in the Barcode simulation tab.</p></div>', unsafe_allow_html=True)
 
     selected_store_id = st.selectbox(
         "Select store to edit",
@@ -556,8 +687,8 @@ if menu == "Manage stores":
             st.write("Configure rooms and places in the Barcode simulation page.")
             st.markdown("---")
 
-elif menu == "Barcode simulation":
-    st.header("Barcode simulation")
+elif page == "Barcode simulation":
+    st.markdown('<div class="card"><p class="card-title">Barcode simulation</p><h2 style="margin:0;color:#ffffff;">Scan and verify inventory</h2><p class="card-note">Select a store, configure rooms and places, then start the barcode simulation.</p></div>', unsafe_allow_html=True)
 
     if not stores:
         st.info("Create a store first in the Manage stores tab.")

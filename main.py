@@ -70,11 +70,25 @@ if "flask_started" not in st.session_state:
 
 # --- PART 3: STREAMLIT ADMIN DASHBOARD ---
 st.set_page_config(page_title="KUHS Admin", layout="wide")
-st.title(" Admin Panel")
+st.markdown(
+    """
+    <style>
+    .metric-card { background: #0f172a; border: 1px solid #334155; border-radius: 20px; padding: 24px; }
+    .stButton>button { background: #2563eb; color: white; border: none; border-radius: 12px; padding: 12px 18px; font-weight: 700; box-shadow: 0 10px 30px rgba(37,99,235,.18); }
+    .stButton>button:hover { background: #1d4ed8; }
+    .section-note { color: #94a3b8; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+st.title("KUHS Admin Dashboard")
 
+if "current_page" not in st.session_state:
+    st.session_state.current_page = "Home"
 
-# Navigation
-menu = st.sidebar.radio("Navigation", ["Simulate Action", "Store History"])
+pages = ["Home", "Simulate Action", "Store History"]
+page = st.sidebar.radio("Navigation", pages, index=pages.index(st.session_state.current_page))
+st.session_state.current_page = page
 
 def get_active_store():
     conn = sqlite3.connect(DB_NAME)
@@ -157,8 +171,73 @@ def export_store_to_excel(store_id):
     output.seek(0)
     return output
 
+# --- HOME PAGE HELPERS ---
+def get_dashboard_summary():
+    conn = sqlite3.connect(DB_NAME)
+    total_stores = conn.execute("SELECT COUNT(*) FROM stores").fetchone()[0]
+    total_scans = conn.execute("SELECT COUNT(*) FROM scans").fetchone()[0]
+    scan_by_store = pd.read_sql_query(
+        "SELECT stores.name AS store_name, COUNT(scans.id) AS scan_count "
+        "FROM stores LEFT JOIN scans ON stores.id = scans.store_id "
+        "GROUP BY stores.id ORDER BY scan_count DESC",
+        conn,
+    )
+    scan_over_time = pd.read_sql_query(
+        "SELECT DATE(time) AS scan_date, COUNT(*) AS scan_count "
+        "FROM scans GROUP BY DATE(time) ORDER BY scan_date",
+        conn,
+    )
+    conn.close()
+    return total_stores, total_scans, scan_by_store, scan_over_time
+
+
+def render_home_page():
+    st.header("Welcome to KUHS Admin")
+    st.markdown("Manage stores, review scan activity, and launch simulations from one polished dashboard.")
+
+    total_stores, total_scans, scan_by_store, scan_over_time = get_dashboard_summary()
+    active_store = get_active_store()
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Registered Stores", total_stores)
+    col2.metric("Total Scans", total_scans)
+    col3.metric("Active Simulation", "Running" if active_store else "Stopped", active_store if active_store else "No active store")
+
+    st.markdown("---")
+    st.subheader("Recent activity")
+    chart_col1, chart_col2 = st.columns(2)
+    with chart_col1:
+        st.markdown("**Scans by store**")
+        if not scan_by_store.empty:
+            store_chart_data = scan_by_store.rename(columns={"store_name": "Store", "scan_count": "Scans"}).set_index("Store")
+            st.bar_chart(store_chart_data)
+        else:
+            st.info("No scan data available yet.")
+
+    with chart_col2:
+        st.markdown("**Scan volume over time**")
+        if not scan_over_time.empty:
+            time_chart_data = scan_over_time.rename(columns={"scan_date": "Date", "scan_count": "Scans"}).set_index("Date")
+            st.line_chart(time_chart_data)
+        else:
+            st.info("No historical scans found.")
+
+    st.markdown("---")
+    st.subheader("Quick actions")
+    button_col1, button_col2 = st.columns(2)
+    if button_col1.button("Start simulation"):
+        st.session_state.current_page = "Simulate Action"
+        st.experimental_rerun()
+    if button_col2.button("View store history"):
+        st.session_state.current_page = "Store History"
+        st.experimental_rerun()
+
+
 # --- PAGE 1: SIMULATE ACTION ---
-if menu == "Simulate Action":
+if page == "Home":
+    render_home_page()
+
+elif page == "Simulate Action":
     st.header("➕ Add Record & Start Scanning")
     
     active_store = get_active_store()
@@ -213,7 +292,7 @@ if menu == "Simulate Action":
                 st.rerun()
 
 # --- PAGE 2: HISTORY ---
-elif menu == "Store History":
+elif page == "Store History":
     st.header("📂 Registered Stores")
     
     conn = sqlite3.connect(DB_NAME)
