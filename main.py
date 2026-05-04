@@ -227,10 +227,10 @@ def render_home_page():
     button_col1, button_col2 = st.columns(2)
     if button_col1.button("Start simulation"):
         st.session_state.current_page = "Simulate Action"
-        st.experimental_rerun()
+        st.rerun()
     if button_col2.button("View store history"):
         st.session_state.current_page = "Store History"
-        st.experimental_rerun()
+        st.rerun()
 
 
 # --- PAGE 1: SIMULATE ACTION ---

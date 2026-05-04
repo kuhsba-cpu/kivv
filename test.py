@@ -15,20 +15,23 @@ st.set_page_config(page_title="Store Manager", layout="wide")
 st.markdown(
     """
     <style>
-    .stApp { background: #030611; color: #e2e8f0; }
-    .page-header { padding: 24px; border-radius: 24px; background: linear-gradient(135deg, #111827 0%, #17233a 100%); box-shadow: 0 24px 80px rgba(15,23,42,.35); margin-bottom: 24px; }
-    .page-header h1 { margin: 0; font-size: 44px; letter-spacing: -0.02em; color: #ffffff; }
-    .page-header p { margin: 10px 0 0; color: #94a3b8; font-size: 16px; }
-    .card { background: #111827; border: 1px solid rgba(148,163,184,.12); border-radius: 24px; padding: 24px; box-shadow: 0 20px 60px rgba(15,23,42,.16); }
-    .card-title { margin: 0; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.14em; font-size: 13px; }
-    .card-value { margin: 10px 0 0; color: #ffffff; font-size: 36px; font-weight: 800; }
-    .card-note { margin: 14px 0 0; color: #94a3b8; line-height: 1.6; }
-    .button-block { padding: 22px; border-radius: 20px; background: #0f172a; border: 1px solid rgba(148,163,184,.08); }
+    .stApp { background: #050812; color: #e2e8f0; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    .stSidebar .sidebar-content { background: #0b1221; border-right: 1px solid rgba(148,163,184,.12); }
+    .page-header { padding: 28px 32px; border-radius: 28px; background: linear-gradient(135deg, #111827 0%, #17233a 100%); box-shadow: 0 24px 80px rgba(15,23,42,.35); margin-bottom: 28px; }
+    .page-header h1 { margin: 0; font-size: 48px; letter-spacing: -0.04em; color: #ffffff; }
+    .page-header p { margin: 12px 0 0; color: #94a3b8; font-size: 17px; line-height: 1.6; max-width: 760px; }
+    .card { background: #0f172a; border: 1px solid rgba(148,163,184,.12); border-radius: 24px; padding: 24px; box-shadow: 0 20px 60px rgba(15,23,42,.18); }
+    .card-title { margin: 0; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.12em; font-size: 12px; }
+    .card-value { margin: 10px 0 0; color: #ffffff; font-size: 34px; font-weight: 800; }
+    .card-note { margin: 14px 0 0; color: #94a3b8; line-height: 1.65; font-size: 14px; }
+    .button-block { padding: 20px 22px; border-radius: 20px; background: #111827; border: 1px solid rgba(148,163,184,.08); }
     .button-label { margin: 0 0 12px; font-size: 14px; color: #94a3b8; }
-    .section-title { margin-bottom: 16px; color: #f8fafc; }
+    .section-title { margin-bottom: 16px; color: #f8fafc; font-size: 18px; font-weight: 700; }
     .detail-box { background: #0b1221; border: 1px solid rgba(148,163,184,.08); border-radius: 20px; padding: 18px; }
     .stButton>button { background: #2563eb; color: #ffffff; border: none; border-radius: 12px; padding: 12px 18px; font-weight: 700; box-shadow: 0 12px 30px rgba(37,99,235,.2); }
     .stButton>button:hover { background: #1d4ed8; }
+    .stTextInput>div>div>input, .stNumberInput>div>div>input, .stSelectbox>div>div>div { background: #0b1221; color: #e2e8f0; border: 1px solid #334155; }
+    .stTextInput>div>div>input::placeholder, .stSelectbox>div>div>div::placeholder { color: #94a3b8; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -37,7 +40,7 @@ st.markdown(
     """
     <div class="page-header">
       <h1>Store Manager Dashboard</h1>
-      <p>Track stores, rooms, places, and barcode scans from one modern control center.</p>
+      <p>Manage stores, scanning workflows, and inventory simulation from one refined control center.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -93,6 +96,7 @@ def init_db():
             store_id INTEGER NOT NULL,
             place_id INTEGER,
             barcode TEXT NOT NULL,
+            device_id TEXT,
             time TEXT NOT NULL,
             FOREIGN KEY(store_id) REFERENCES stores(id) ON DELETE CASCADE,
             FOREIGN KEY(place_id) REFERENCES places(id) ON DELETE CASCADE
@@ -102,11 +106,28 @@ def init_db():
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS active_sim (
+            device_id TEXT,
             store_id INTEGER,
             active_place_id INTEGER
         )
         """
     )
+    conn.commit()
+    conn.close()
+    ensure_db_columns()
+
+
+def ensure_db_columns():
+    conn = get_conn()
+    active_sim_columns = [row["name"] for row in conn.execute("PRAGMA table_info(active_sim)").fetchall()]
+    if "device_id" not in active_sim_columns:
+        conn.execute("ALTER TABLE active_sim ADD COLUMN device_id TEXT")
+        conn.execute("UPDATE active_sim SET device_id = 'global' WHERE device_id IS NULL")
+
+    scan_columns = [row["name"] for row in conn.execute("PRAGMA table_info(scans)").fetchall()]
+    if "device_id" not in scan_columns:
+        conn.execute("ALTER TABLE scans ADD COLUMN device_id TEXT")
+
     conn.commit()
     conn.close()
 
@@ -207,6 +228,8 @@ def clear_structure_state():
         )
     ]
     for key in keys:
+        if key == "structure_selected_store_id":
+            continue
         del st.session_state[key]
 
 
@@ -344,11 +367,11 @@ def save_store_structure(store_id, rooms_count):
     conn.close()
 
 
-def insert_scan(store_id, place_id, barcode):
+def insert_scan(store_id, place_id, barcode, device_id=None):
     conn = get_conn()
     conn.execute(
-        "INSERT INTO scans (store_id, place_id, barcode, time) VALUES (?, ?, ?, ?)",
-        (store_id, place_id, barcode.strip(), datetime.now().isoformat()),
+        "INSERT INTO scans (store_id, place_id, barcode, device_id, time) VALUES (?, ?, ?, ?, ?)",
+        (store_id, place_id, barcode.strip(), device_id, datetime.now().isoformat()),
     )
     conn.commit()
     conn.close()
@@ -416,6 +439,73 @@ def get_place_by_id(place_id):
     return place
 
 
+def get_active_sessions(store_id=None):
+    conn = get_conn()
+    query = "SELECT device_id, store_id, active_place_id FROM active_sim"
+    params = ()
+    if store_id is not None:
+        query += " WHERE store_id = ? AND device_id != 'global'"
+        params = (store_id,)
+    sessions = conn.execute(query, params).fetchall()
+    conn.close()
+    return sessions
+
+
+def stop_store_sessions(store_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM active_sim WHERE store_id = ?", (store_id,))
+    conn.commit()
+    conn.close()
+
+
+def start_store_simulation(store_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    existing = cur.execute(
+        "SELECT device_id FROM active_sim WHERE device_id = 'global'",
+    ).fetchone()
+    if existing:
+        cur.execute(
+            "UPDATE active_sim SET store_id = ?, active_place_id = NULL WHERE device_id = 'global'",
+            (store_id,),
+        )
+    else:
+        cur.execute(
+            "INSERT INTO active_sim (device_id, store_id, active_place_id) VALUES ('global', ?, NULL)",
+            (store_id,),
+        )
+    conn.commit()
+    conn.close()
+
+
+def is_store_simulation_active(store_id):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT 1 FROM active_sim WHERE device_id = 'global' AND store_id = ?",
+        (store_id,),
+    ).fetchone()
+    conn.close()
+    return bool(row)
+
+
+def get_recent_scans_for_store(store_id, limit=20):
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT scans.barcode, scans.time, scans.device_id, places.name as place_name, rooms.name as room_name
+        FROM scans
+        LEFT JOIN places ON scans.place_id = places.id
+        LEFT JOIN rooms ON places.room_id = rooms.id
+        WHERE scans.store_id = ?
+        ORDER BY scans.id DESC
+        LIMIT ?
+        """,
+        (store_id, limit),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
 def get_barcode_image(code):
     barcode_class = barcode.get_barcode_class('code128')
     bar = barcode_class(code, writer=ImageWriter())
@@ -439,55 +529,93 @@ app = Flask(__name__)
 def receive_scan():
     data = request.json
     barcode = data.get('content') if data else None
-    
+
     if not barcode:
-        return {"status": "fail"}, 400
+        return {"status": "fail", "message": "Missing barcode."}, 400
 
     barcode = barcode.strip()
+    device_id = None
+    if data:
+        device_id = data.get('device_id') or data.get('deviceName') or data.get('device_name')
+    if not device_id:
+        device_id = request.headers.get('X-Device-ID') or request.headers.get('Device-ID')
+
+    if not device_id:
+        addr = request.headers.get('X-Forwarded-For') or request.remote_addr or ''
+        ua = request.headers.get('User-Agent') or ''
+        device_id = f"{addr}|{ua[:80]}" if addr or ua else 'unknown-device'
+
+    device_id = str(device_id).strip()
+    if not device_id:
+        device_id = 'unknown-device'
+
     conn = get_conn()
     cur = conn.cursor()
-    
-    active = cur.execute("SELECT store_id, active_place_id FROM active_sim LIMIT 1").fetchone()
-    
-    if not active:
-        conn.close()
-        return {"status": "rejected", "message": "Simulation OFF"}, 403
-        
-    store_id = active["store_id"]
-    active_place_id = active["active_place_id"]
 
-    # 1. Check if the scanned barcode belongs to a place in this store
     place_check = cur.execute(
         """
-        SELECT p.id 
-        FROM places p 
-        JOIN rooms r ON p.room_id = r.id 
-        WHERE p.unique_code = ? AND r.store_id = ?
-        """, 
-        (barcode, store_id)
+        SELECT p.id, r.store_id
+        FROM places p
+        JOIN rooms r ON p.room_id = r.id
+        WHERE p.unique_code = ?
+        """,
+        (barcode,),
     ).fetchone()
 
     if place_check:
         place_id = place_check["id"]
-        # If it's already the active place, close it
-        if active_place_id == place_id:
-            cur.execute("UPDATE active_sim SET active_place_id = NULL")
+        store_id = place_check["store_id"]
+        simulation_active = cur.execute(
+            "SELECT 1 FROM active_sim WHERE device_id = 'global' AND store_id = ?",
+            (store_id,),
+        ).fetchone()
+        if not simulation_active:
+            conn.close()
+            return {"status": "rejected", "message": "Simulation not started for this store."}, 403
+
+        active = cur.execute(
+            "SELECT store_id, active_place_id FROM active_sim WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+
+        if active:
+            if active["store_id"] != store_id:
+                cur.execute(
+                    "UPDATE active_sim SET store_id = ?, active_place_id = ? WHERE device_id = ?",
+                    (store_id, place_id, device_id),
+                )
+            elif active["active_place_id"] == place_id:
+                cur.execute(
+                    "UPDATE active_sim SET active_place_id = NULL WHERE device_id = ?",
+                    (device_id,),
+                )
+            else:
+                cur.execute(
+                    "UPDATE active_sim SET active_place_id = ? WHERE device_id = ?",
+                    (place_id, device_id),
+                )
         else:
-            # Open the new place
-            cur.execute("UPDATE active_sim SET active_place_id = ?", (place_id,))
-        
+            cur.execute(
+                "INSERT INTO active_sim (device_id, store_id, active_place_id) VALUES (?, ?, ?)",
+                (device_id, store_id, place_id),
+            )
+
         conn.commit()
         conn.close()
-        return {"status": "success", "message": "Place toggled"}, 200
+        return {"status": "success", "message": "Place toggled", "place_id": place_id}, 200
 
-    # 2. It's a regular item scan. Check if a place is open.
-    if active_place_id:
-        insert_scan(store_id, active_place_id, barcode)
+    active = cur.execute(
+        "SELECT store_id, active_place_id FROM active_sim WHERE device_id = ?",
+        (device_id,),
+    ).fetchone()
+
+    if active and active["active_place_id"]:
+        insert_scan(active["store_id"], active["active_place_id"], barcode, device_id)
         conn.close()
         return {"status": "success"}, 200
-    else:
-        conn.close()
-        return {"status": "rejected", "message": "Scan a place barcode first"}, 403
+
+    conn.close()
+    return {"status": "rejected", "message": "Scan a place barcode first."}, 403
 
 
 def run_flask():
@@ -510,6 +638,8 @@ if "store_form_store_id" not in st.session_state:
 
 if "structure_store_id" not in st.session_state:
     st.session_state.structure_store_id = 0
+if "structure_selected_store_id" not in st.session_state:
+    st.session_state.structure_selected_store_id = 0
 
 
 def get_active_store_name():
@@ -596,10 +726,10 @@ def render_home_page():
         )
         if action_col1.button("Manage stores"):
             st.session_state.current_page = "Manage stores"
-            st.experimental_rerun()
+            st.rerun()
         if action_col2.button("Barcode simulation"):
             st.session_state.current_page = "Barcode simulation"
-            st.experimental_rerun()
+            st.rerun()
 
     if active_store:
         st.markdown('<div class="card"><p class="card-title">Active simulation</p><p class="card-value">Running</p><p class="card-note">Current active store: ' + active_store + '</p></div>', unsafe_allow_html=True)
@@ -688,7 +818,10 @@ elif page == "Manage stores":
             st.markdown("---")
 
 elif page == "Barcode simulation":
-    st.markdown('<div class="card"><p class="card-title">Barcode simulation</p><h2 style="margin:0;color:#ffffff;">Scan and verify inventory</h2><p class="card-note">Select a store, configure rooms and places, then start the barcode simulation.</p></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="card"><p class="card-title">Barcode simulation</p><h2 style="margin:0;color:#ffffff;">Scan and verify inventory</h2><p class="card-note">Select a store, configure rooms and places, then scan from any mobile device. Each mobile session is tracked separately to avoid interference.</p></div>',
+        unsafe_allow_html=True,
+    )
 
     if not stores:
         st.info("Create a store first in the Manage stores tab.")
@@ -701,43 +834,98 @@ elif page == "Barcode simulation":
             "Select store to configure and scan",
             options=list(structure_options.keys()),
             format_func=lambda x: structure_options[x],
-            index=list(structure_options.keys()).index(st.session_state.structure_store_id)
-            if st.session_state.structure_store_id in structure_options
+            index=list(structure_options.keys()).index(st.session_state.structure_selected_store_id)
+            if st.session_state.structure_selected_store_id in structure_options
             else 0,
-            key="structure_store_id",
+            key="structure_selected_store_id",
         )
 
         if selected_store_id != st.session_state.get("structure_store_id", 0):
             if selected_store_id == 0:
                 clear_structure_state()
+                st.session_state.structure_store_id = 0
             else:
                 load_structure_form(selected_store_id)
+                st.session_state.structure_store_id = selected_store_id
+
+        elif selected_store_id != 0 and "structure_rooms_count" not in st.session_state:
+            load_structure_form(selected_store_id)
+            st.session_state.structure_store_id = selected_store_id
 
         if selected_store_id == 0:
-            st.warning("Select a store first to manage rooms, places, and simulation.")
+            st.warning("Select a store first to manage rooms, places, and scan sessions.")
         else:
             store = get_store(selected_store_id)
-            st.subheader(f"Store: {store['name']} — {store['location']}")
+            active_sessions = get_active_sessions(selected_store_id)
 
-            with st.expander("Manage rooms and places", expanded=True):
-                rooms_count = st.number_input(
-                    "Number of rooms",
-                    min_value=1,
-                    value=st.session_state.get("structure_rooms_count", 1),
-                    step=1,
-                    key="structure_rooms_count",
+            top_left, top_right = st.columns([3, 1], gap="large")
+            with top_left:
+                st.subheader(f"Store: {store['name']} — {store['location']}")
+                st.markdown(
+                    '<div class="card"><p class="card-title">Multi-device scanning</p><p class="card-note">Each mobile keeps its own active place context. Scan a place barcode first on the phone, then scan item barcodes. Sessions do not interfere across devices.</p></div>',
+                    unsafe_allow_html=True,
                 )
 
-                st.markdown("""
-                    <div style='background:#111827; padding:12px; border-radius:10px; margin-bottom:16px; color:#e2e8f0;'>
-                    Use the room and place counts to update the structure, then click **Save structure**.
-                    </div>
-                """, unsafe_allow_html=True)
-
-                for room_index in range(rooms_count):
-                    with st.container():
+            with top_right:
+                st.markdown('<div class="card"><p class="card-title">Active scanners</p>', unsafe_allow_html=True)
+                if active_sessions:
+                    for session in active_sessions:
+                        place = get_place_by_id(session["active_place_id"])
+                        place_name = place["name"] if place else "Waiting for place barcode"
+                        place_code = place["unique_code"] if place else ""
                         st.markdown(
-                            f"<div style='padding:12px; border:1px solid #374151; border-radius:12px; margin-bottom:18px; background:#0f172a; color:#f8fafc;'>"
+                            f"<div style='padding:12px; border:1px solid #334155; border-radius:14px; margin-bottom:12px; background:#0f172a; color:#f8fafc;'>"
+                            f"<strong>Device:</strong> {session['device_id']}<br/>"
+                            f"<strong>Active place:</strong> {place_name}<br/>"
+                            f"<strong>Code:</strong> <code style='background:#111827; color:#e2e8f0; padding:2px 4px; border-radius:4px;'>{place_code}</code>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    st.info("No active scanner sessions for this store yet.")
+
+                simulation_active = is_store_simulation_active(selected_store_id)
+                if simulation_active:
+                    st.success("Simulation is active for this store. Mobile devices can now scan place barcodes.")
+                else:
+                    st.warning("Simulation is not started. Use the button below to start scanning.")
+
+                if st.button("Start stimulation for this store"):
+                    start_store_simulation(selected_store_id)
+                    st.success("Stimulation started for the selected store. Scan place barcodes from any device now.")
+                    st.rerun()
+
+                if st.button("Stop stimulation for this store", type="secondary"):
+                    stop_store_sessions(selected_store_id)
+                    st.success("All active scan sessions were stopped.")
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            st.markdown("---")
+            main_col, side_col = st.columns([2, 1], gap="large")
+
+            with main_col:
+                with st.expander("Configure rooms & places", expanded=True):
+                    rooms_count = st.number_input(
+                        "Number of rooms",
+                        min_value=1,
+                        value=st.session_state.get("structure_rooms_count", 1),
+                        step=1,
+                        key="structure_rooms_count",
+                    )
+
+                    st.markdown(
+                        """
+                        <div style='background:#111827; padding:14px; border-radius:16px; margin-bottom:18px; color:#e2e8f0;'>
+                        Add rooms and place details here. Each place must have a unique barcode code for scanning.
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    for room_index in range(rooms_count):
+                        st.markdown(
+                            f"<div style='padding:14px; border:1px solid #334155; border-radius:16px; margin-bottom:18px; background:#0f172a; color:#f8fafc;'>"
                             f"<h4 style='margin:0 0 8px 0; color:#f8fafc;'>Room {room_index + 1}</h4>"
                             f"</div>",
                             unsafe_allow_html=True,
@@ -758,7 +946,7 @@ elif page == "Barcode simulation":
 
                         for place_index in range(place_count):
                             st.markdown(
-                                f"<div style='padding:12px; border:1px solid #374151; border-radius:10px; margin-bottom:14px; background:#0f172a; color:#f8fafc;'>"
+                                f"<div style='padding:12px; border:1px solid #334155; border-radius:14px; margin-bottom:14px; background:#0f172a; color:#f8fafc;'>"
                                 f"<strong>Place {place_index + 1}</strong>"
                                 f"</div>",
                                 unsafe_allow_html=True,
@@ -781,119 +969,17 @@ elif page == "Barcode simulation":
                                 step=1,
                             )
 
-                if st.button("Save structure", type="primary"):
-                    error = validate_structure_inputs(rooms_count)
-                    if error:
-                        st.error(error)
-                    else:
-                        try:
-                            save_store_structure(selected_store_id, rooms_count)
-                            st.success("Rooms and places saved successfully.")
-                            load_structure_form(selected_store_id)
-                        except sqlite3.IntegrityError as exc:
-                            st.error("A place code must be unique. Please adjust the duplicate code and save again.")
-
-            st.markdown("---")
-            st.subheader("Saved structure")
-            saved_rooms = get_store_structure(selected_store_id)
-            if not saved_rooms:
-                st.info("No rooms and places saved yet. Add them above and save the structure.")
-            else:
-                for room_index, room in enumerate(saved_rooms, start=1):
-                    st.markdown(
-                        f"<div style='padding:16px; border:1px solid #374151; border-radius:14px; background:#0f172a; margin-bottom:18px; color:#f8fafc;'>"
-                        f"<h3 style='margin:0 0 10px 0; color:#f8fafc;'>Room {room_index}: {room['name']}</h3>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-                    for place_index, place in enumerate(room["places"], start=1):
-                        cols = st.columns([3, 1])
-                        with cols[0]:
-                            st.markdown(
-                                f"<div style='padding:12px; border:1px solid #374151; border-radius:12px; background:#0f172a; color:#f8fafc;'>"
-                                f"<strong>Place {place_index}: {place['name']}</strong><br/>"
-                                f"Expected items: <strong>{place['item_count']}</strong><br/>"
-                                f"Code: <code style='background:#111827; color:#e2e8f0; padding:2px 4px; border-radius:4px;'>{place['unique_code']}</code>"
-                                f"</div>",
-                                unsafe_allow_html=True,
-                            )
-                        with cols[1]:
-                            st.image(get_barcode_image(place["unique_code"]), width=220)
-                    st.markdown("---")
-
-            conn = get_conn()
-            active_sim = conn.execute("SELECT store_id, active_place_id FROM active_sim LIMIT 1").fetchone()
-            conn.close()
-
-            if active_sim:
-                active_store_id = active_sim["store_id"]
-                active_place_id = active_sim["active_place_id"]
-                active_store = get_store(active_store_id)
-                open_place = get_place_by_id(active_place_id)
-
-                if active_store_id != selected_store_id:
-                    st.warning(f"Simulation is currently active for {active_store['name']}. Stop it before starting a new one.")
-
-                st.success(f"🟢 SIMULATION RUNNING FOR: {active_store['name']}")
-                if open_place:
-                    st.info(f"📂 PLACE OPEN: **{open_place['name']}** (Code: {open_place['unique_code']}). Scan items to save them here. Scan place code again to close.")
-                else:
-                    st.warning("⏳ WAITING: Scan a place's unique barcode to open it.")
-
-                st.subheader("Live Scans")
-                scans = get_scans(active_store_id)
-                if not scans:
-                    st.write("No items scanned yet.")
-                else:
-                    for scan in scans:
-                        cols = st.columns([6, 3, 2])
-                        cols[0].write(f"**{scan['barcode']}**")
-                        cols[1].write(f"📍 {scan['place_name']}")
-                        if cols[2].button("Delete", key=f"delete_scan_{scan['id']}"):
-                            delete_scan(scan['id'])
-                            st.rerun()
-
-                st.markdown("---")
-                if st.button("🛑 Stop Simulation", type="primary"):
-                    summary = compare_place_counts(active_store_id)
-                    conn = get_conn()
-                    conn.execute("DELETE FROM active_sim")
-                    conn.commit()
-                    conn.close()
-                    st.session_state.simulation_stop_summary = summary
-                    st.session_state.simulation_stop_store_id = active_store_id
-                    st.rerun()
-
-                time.sleep(2)
-                st.rerun()
-            else:
-                st.warning("🔴 No simulation running. Start one below to receive scans.")
-                if st.button("🚀 Start Simulation", type="primary"):
-                    conn = get_conn()
-                    conn.execute("DELETE FROM active_sim")
-                    conn.execute("INSERT INTO active_sim (store_id, active_place_id) VALUES (?, NULL)", (selected_store_id,))
-                    conn.commit()
-                    conn.close()
-                    st.rerun()
-
-                if "simulation_stop_summary" in st.session_state:
-                    st.markdown("---")
-                    st.subheader("Simulation result check")
-                    store = get_store(st.session_state.simulation_stop_store_id)
-                    if store:
-                        st.write(f"Store: **{store['name']}** ({store['location']})")
-                    summary = st.session_state.simulation_stop_summary
-                    for item in summary:
-                        if item["difference"] == 0:
-                            st.success(
-                                f"{item['room_name']} / {item['place_name']}: expected {item['expected']}, scanned {item['scanned']} — OK"
-                            )
+                    if st.button("Save structure", type="primary"):
+                        error = validate_structure_inputs(rooms_count)
+                        if error:
+                            st.error(error)
                         else:
-                            st.error(
-                                f"{item['room_name']} / {item['place_name']}: expected {item['expected']}, scanned {item['scanned']} — difference {item['difference']}"
-                            )
-                    del st.session_state.simulation_stop_summary
-                    del st.session_state.simulation_stop_store_id
+                            try:
+                                save_store_structure(selected_store_id, rooms_count)
+                                st.success("Rooms and places saved successfully.")
+                                load_structure_form(selected_store_id)
+                            except sqlite3.IntegrityError:
+                                st.error("A place code must be unique. Please adjust the duplicate code and save again.")
 
                 st.markdown("---")
                 st.subheader("Place scan difference")
@@ -902,24 +988,74 @@ elif page == "Barcode simulation":
                     st.info("No configured places to compare yet.")
                 else:
                     for item in place_differences:
-                        if item["difference"] == 0:
-                            st.success(
-                                f"{item['room_name']} / {item['place_name']}: expected {item['expected']}, scanned {item['scanned']} — OK"
-                            )
+                        if item['difference'] == 0:
+                            st.success(f"{item['room_name']} / {item['place_name']}: {item['scanned']} scanned — OK")
                         else:
-                            status = "over" if item["difference"] > 0 else "under"
-                            st.error(
-                                f"{item['room_name']} / {item['place_name']}: expected {item['expected']}, scanned {item['scanned']} — {abs(item['difference'])} {status}"
-                            )
+                            status = "over" if item['difference'] > 0 else "under"
+                            st.error(f"{item['room_name']} / {item['place_name']}: {item['scanned']} scanned — {abs(item['difference'])} {status}")
+
+            with side_col:
+                st.subheader("Saved structure")
+                saved_rooms = get_store_structure(selected_store_id)
+                if not saved_rooms:
+                    st.info("No rooms and places saved yet. Add them on the left and save.")
+                else:
+                    for room_index, room in enumerate(saved_rooms, start=1):
+                        st.markdown(
+                            f"<div style='padding:16px; border:1px solid #334155; border-radius:16px; background:#0f172a; margin-bottom:16px; color:#f8fafc;'>"
+                            f"<h3 style='margin:0 0 10px 0; color:#f8fafc;'>Room {room_index}: {room['name']}</h3>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+                        for place_index, place in enumerate(room['places'], start=1):
+                            place_cols = st.columns([3, 1], gap="small")
+                            with place_cols[0]:
+                                st.markdown(
+                                    f"<div style='padding:14px; border:1px solid #334155; border-radius:14px; background:#0f172a; color:#f8fafc;'>"
+                                    f"<strong>Place {place_index}: {place['name']}</strong><br/>"
+                                    f"Expected: <strong>{place['item_count']}</strong><br/>"
+                                    f"Code: <code style='background:#111827; color:#e2e8f0; padding:2px 4px; border-radius:4px;'>{place['unique_code']}</code>"
+                                    f"</div>",
+                                    unsafe_allow_html=True,
+                                )
+                            with place_cols[1]:
+                                st.image(get_barcode_image(place['unique_code']), width=160)
 
                 st.markdown("---")
-                st.subheader("Past Scans")
-                scans = get_scans(selected_store_id)
-                if not scans:
-                    st.info("No barcodes scanned for this store yet.")
+                st.subheader("Recent scans")
+                recent_scans = get_recent_scans_for_store(selected_store_id)
+                if not recent_scans:
+                    st.info("No scans recorded yet.")
                 else:
-                    for scan in scans:
-                        st.write(f"**{scan['barcode']}** in 📍 {scan['place_name']} — {scan['time']}")
+                    scan_rows = [
+                        {
+                            "Time": row["time"],
+                            "Device": row["device_id"] or "unknown",
+                            "Barcode": row["barcode"],
+                            "Place": row["place_name"] or "Unknown",
+                            "Room": row["room_name"] or "Unknown",
+                        }
+                        for row in recent_scans
+                    ]
+                    st.dataframe(pd.DataFrame(scan_rows), use_container_width=True)
+
+                st.markdown("---")
+                st.subheader("Device sessions")
+                if active_sessions:
+                    session_rows = []
+                    for session in active_sessions:
+                        place = get_place_by_id(session["active_place_id"])
+                        session_rows.append(
+                            {
+                                "Device": session["device_id"],
+                                "Place": place["name"] if place else "Waiting",
+                                "Code": place["unique_code"] if place else "",
+                                "Status": "Open" if place else "Waiting",
+                            }
+                        )
+                    st.table(pd.DataFrame(session_rows))
+                else:
+                    st.info("No active device sessions for this store.")
 
                 st.markdown("---")
                 st.write("Database file:")
