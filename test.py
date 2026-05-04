@@ -492,7 +492,7 @@ def get_recent_scans_for_store(store_id, limit=20):
     conn = get_conn()
     rows = conn.execute(
         """
-        SELECT scans.barcode, scans.time, scans.device_id, places.name as place_name, rooms.name as room_name
+        SELECT scans.id, scans.barcode, scans.time, scans.device_id, places.name as place_name, rooms.name as room_name
         FROM scans
         LEFT JOIN places ON scans.place_id = places.id
         LEFT JOIN rooms ON places.room_id = rooms.id
@@ -501,6 +501,23 @@ def get_recent_scans_for_store(store_id, limit=20):
         LIMIT ?
         """,
         (store_id, limit),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_all_scans_for_store(store_id):
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT scans.id, scans.barcode, scans.time, scans.device_id, places.name as place_name, rooms.name as room_name
+        FROM scans
+        LEFT JOIN places ON scans.place_id = places.id
+        LEFT JOIN rooms ON places.room_id = rooms.id
+        WHERE scans.store_id = ?
+        ORDER BY scans.id DESC
+        """,
+        (store_id,),
     ).fetchall()
     conn.close()
     return rows
@@ -571,7 +588,10 @@ def receive_scan():
         ).fetchone()
         if not simulation_active:
             conn.close()
-            return {"status": "rejected", "message": "Simulation not started for this store."}, 403
+            return {
+                 "rejected",
+                "Start simulation before scanning.",
+            }, 403
 
         active = cur.execute(
             "SELECT store_id, active_place_id FROM active_sim WHERE device_id = ?",
@@ -584,25 +604,29 @@ def receive_scan():
                     "UPDATE active_sim SET store_id = ?, active_place_id = ? WHERE device_id = ?",
                     (store_id, place_id, device_id),
                 )
+                action_message = "Active store and place context updated successfully."
             elif active["active_place_id"] == place_id:
                 cur.execute(
                     "UPDATE active_sim SET active_place_id = NULL WHERE device_id = ?",
                     (device_id,),
                 )
+                action_message = "Place deselected. Scan a place barcode to resume item scanning."
             else:
                 cur.execute(
                     "UPDATE active_sim SET active_place_id = ? WHERE device_id = ?",
                     (place_id, device_id),
                 )
+                action_message = "Active place updated successfully."
         else:
             cur.execute(
                 "INSERT INTO active_sim (device_id, store_id, active_place_id) VALUES (?, ?, ?)",
                 (device_id, store_id, place_id),
             )
+            action_message = "Place selected successfully"
 
         conn.commit()
         conn.close()
-        return {"status": "success", "message": "Place toggled", "place_id": place_id}, 200
+        return {"status": "success", "message": action_message, "place_id": place_id}, 200
 
     active = cur.execute(
         "SELECT store_id, active_place_id FROM active_sim WHERE device_id = ?",
@@ -612,10 +636,13 @@ def receive_scan():
     if active and active["active_place_id"]:
         insert_scan(active["store_id"], active["active_place_id"], barcode, device_id)
         conn.close()
-        return {"status": "success"}, 200
+        return {"status": "success", "message": "Item scan recorded successfully."}, 200
 
     conn.close()
-    return {"status": "rejected", "message": "Scan a place barcode first."}, 403
+    return {
+        "status": "rejected",
+        "message": "No active place selected. Scan a place barcode first to begin item scanning.",
+    }, 403
 
 
 def run_flask():
@@ -724,12 +751,6 @@ def render_home_page():
             '<div class="button-block"><p class="button-label">Prepare rooms, places and start scanning.</p></div>',
             unsafe_allow_html=True,
         )
-        if action_col1.button("Manage stores"):
-            st.session_state.current_page = "Manage stores"
-            st.rerun()
-        if action_col2.button("Barcode simulation"):
-            st.session_state.current_page = "Barcode simulation"
-            st.rerun()
 
     if active_store:
         st.markdown('<div class="card"><p class="card-title">Active simulation</p><p class="card-value">Running</p><p class="card-note">Current active store: ' + active_store + '</p></div>', unsafe_allow_html=True)
@@ -738,21 +759,17 @@ def render_home_page():
 
 
 # --- UI ---
-if "current_page" not in st.session_state:
-    st.session_state.current_page = "Home"
-
-page = st.sidebar.radio("Navigation", ["Home", "Manage stores", "Barcode simulation"], index=["Home", "Manage stores", "Barcode simulation"].index(st.session_state.current_page))
-st.session_state.current_page = page
-
 stores = get_all_stores()
 store_options = {0: "New store"}
 for store in stores:
     store_options[store["id"]] = f"{store['id']} - {store['name']} ({store['location']})"
 
-if page == "Home":
+tab1, tab2, tab3 = st.tabs(["Overview", "Manage Stores", "Barcode Simulation"])
+
+with tab1:
     render_home_page()
 
-elif page == "Manage stores":
+with tab2:
     st.markdown('<div class="card"><p class="card-title">Store manager</p><h2 style="margin:0;color:#ffffff;">Create and manage stores</h2><p class="card-note">Only create or remove stores here. Configure rooms and places in the Barcode simulation tab.</p></div>', unsafe_allow_html=True)
 
     selected_store_id = st.selectbox(
@@ -817,7 +834,7 @@ elif page == "Manage stores":
             st.write("Configure rooms and places in the Barcode simulation page.")
             st.markdown("---")
 
-elif page == "Barcode simulation":
+with tab3:
     st.markdown(
         '<div class="card"><p class="card-title">Barcode simulation</p><h2 style="margin:0;color:#ffffff;">Scan and verify inventory</h2><p class="card-note">Select a store, configure rooms and places, then scan from any mobile device. Each mobile session is tracked separately to avoid interference.</p></div>',
         unsafe_allow_html=True,
@@ -861,10 +878,10 @@ elif page == "Barcode simulation":
             top_left, top_right = st.columns([3, 1], gap="large")
             with top_left:
                 st.subheader(f"Store: {store['name']} — {store['location']}")
-                st.markdown(
-                    '<div class="card"><p class="card-title">Multi-device scanning</p><p class="card-note">Each mobile keeps its own active place context. Scan a place barcode first on the phone, then scan item barcodes. Sessions do not interfere across devices.</p></div>',
-                    unsafe_allow_html=True,
-                )
+               #st.markdown(
+               #    '<div class="card"><p class="card-title">Multi-device scanning</p><p class="card-note">Each mobile keeps its own active place context. Scan a place barcode first on the phone, then scan item barcodes. Sessions do not interfere across devices.</p></div>',
+               #    unsafe_allow_html=True,
+               #)
 
             with top_right:
                 st.markdown('<div class="card"><p class="card-title">Active scanners</p>', unsafe_allow_html=True)
@@ -887,6 +904,10 @@ elif page == "Barcode simulation":
                 simulation_active = is_store_simulation_active(selected_store_id)
                 if simulation_active:
                     st.success("Simulation is active for this store. Mobile devices can now scan place barcodes.")
+                    st.markdown(
+                        "<script>setTimeout(function(){ window.location.reload(); }, 5000);</script>",
+                        unsafe_allow_html=True,
+                    )
                 else:
                     st.warning("Simulation is not started. Use the button below to start scanning.")
 
@@ -1029,6 +1050,7 @@ elif page == "Barcode simulation":
                 else:
                     scan_rows = [
                         {
+                            "ID": row["id"],
                             "Time": row["time"],
                             "Device": row["device_id"] or "unknown",
                             "Barcode": row["barcode"],
@@ -1037,7 +1059,59 @@ elif page == "Barcode simulation":
                         }
                         for row in recent_scans
                     ]
-                    st.dataframe(pd.DataFrame(scan_rows), use_container_width=True)
+                    df_scans = pd.DataFrame(scan_rows)
+                    st.dataframe(df_scans.drop(columns=["ID"]), use_container_width=True)
+
+                    delete_options = [
+                        f"{row['ID']} — {row['Time']} — {row['Barcode']}"
+                        for row in scan_rows
+                    ]
+                    selected_delete = st.selectbox(
+                        "Select a scan to delete",
+                        options=["None"] + delete_options,
+                        key="delete_scan_selector",
+                    )
+                    if selected_delete != "None":
+                        if st.button("Delete selected scan"):
+                            scan_id = int(selected_delete.split(" — ")[0])
+                            delete_scan(scan_id)
+                            st.success("Scan record deleted successfully.")
+                            st.rerun()
+
+                st.markdown("---")
+                st.subheader("All scans")
+                all_scans = get_all_scans_for_store(selected_store_id)
+                if not all_scans:
+                    st.info("No scans recorded yet.")
+                else:
+                    all_scan_rows = [
+                        {
+                            "ID": row["id"],
+                            "Time": row["time"],
+                            "Device": row["device_id"] or "unknown",
+                            "Barcode": row["barcode"],
+                            "Place": row["place_name"] or "Unknown",
+                            "Room": row["room_name"] or "Unknown",
+                        }
+                        for row in all_scans
+                    ]
+                    st.dataframe(pd.DataFrame(all_scan_rows).drop(columns=["ID"]), use_container_width=True)
+
+                    delete_all_options = [
+                        f"{row['ID']} — {row['Time']} — {row['Barcode']}"
+                        for row in all_scan_rows
+                    ]
+                    selected_delete_all = st.selectbox(
+                        "Select a scan to delete from all scans",
+                        options=["None"] + delete_all_options,
+                        key="delete_all_scan_selector",
+                    )
+                    if selected_delete_all != "None":
+                        if st.button("Delete selected scan from all scans"):
+                            scan_id = int(selected_delete_all.split(" — ")[0])
+                            delete_scan(scan_id)
+                            st.success("Scan record deleted successfully.")
+                            st.rerun()
 
                 st.markdown("---")
                 st.subheader("Device sessions")
